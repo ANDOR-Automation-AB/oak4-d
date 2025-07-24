@@ -1,7 +1,7 @@
 
 // init shaders //
 
-const vertexSource = `
+const drawVertexSource = `
     precision mediump float;
     uniform mat4 uProjectionMatrix;
     uniform mat4 uViewMatrix;
@@ -16,12 +16,40 @@ const vertexSource = `
     }
 `;
 
-const fragmentSource = `
+const drawFragmentSource = `
     precision mediump float;
     varying vec3 vColor;
 
     void main() {
         gl_FragColor = vec4(vColor, 1.0);
+    }
+`;
+
+const pickVertexSource = `
+    precision mediump float;
+    uniform mat4 uProjectionMatrix;
+    uniform mat4 uViewMatrix;
+    attribute vec3 aPosition;
+    attribute float aId;
+    varying float vId;
+    void main() {
+        gl_PointSize = 2.0;
+        gl_Position = uProjectionMatrix * uViewMatrix * vec4(aPosition, 1.0);
+        vId = aId;
+    }
+`;
+
+const pickFragmentSource = `
+    precision mediump float;
+    varying float vId;
+    void main() {
+        float id = floor(vId + 0.5);
+        gl_FragColor = vec4(
+            mod(id, 256.0) / 255.0,
+            mod(floor(id / 256.0), 256.0) / 255.0,
+            mod(floor(id / 65536.0), 256.0) / 255.0,
+            1.0
+        );
     }
 `;
 
@@ -37,44 +65,80 @@ canvas.width = canvas.clientWidth;
 canvas.height = canvas.clientHeight;
 gl.viewport(0, 0, canvas.width, canvas.height);
 
-// init gl program //
+// init programs //
 
-const shaderProgram = gl.createProgram();
-const vertexShader = gl.createShader(gl.VERTEX_SHADER);
-const fragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+const drawProgram = gl.createProgram();
+const drawVertexShader = gl.createShader(gl.VERTEX_SHADER);
+const drawFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+
+gl.shaderSource(drawVertexShader, drawVertexSource);
+gl.compileShader(drawVertexShader);
+gl.attachShader(drawProgram, drawVertexShader);
+
+gl.shaderSource(drawFragmentShader, drawFragmentSource);
+gl.compileShader(drawFragmentShader);
+gl.attachShader(drawProgram, drawFragmentShader);
+
+gl.linkProgram(drawProgram);
+
+
+const pickProgram = gl.createProgram();
+const pickVertexShader = gl.createShader(gl.VERTEX_SHADER);
+const pickFragmentShader = gl.createShader(gl.FRAGMENT_SHADER);
+
+gl.shaderSource(pickVertexShader, pickVertexSource);
+gl.compileShader(pickVertexShader);
+gl.attachShader(pickProgram, pickVertexShader);
+
+gl.shaderSource(pickFragmentShader, pickFragmentSource);
+gl.compileShader(pickFragmentShader);
+gl.attachShader(pickProgram, pickFragmentShader);
+
+gl.linkProgram(pickProgram);
+
+
+gl.useProgram(drawProgram);
 
 gl.enable(gl.DEPTH_TEST);
 gl.depthFunc(gl.LEQUAL);
 
-gl.shaderSource(vertexShader, vertexSource);
-gl.compileShader(vertexShader);
-gl.attachShader(shaderProgram, vertexShader);
-
-gl.shaderSource(fragmentShader, fragmentSource);
-gl.compileShader(fragmentShader);
-gl.attachShader(shaderProgram, fragmentShader);
-
-gl.linkProgram(shaderProgram);
-gl.useProgram(shaderProgram);
-
 // create buffer //
 
-const buffer = gl.createBuffer();
-const aPosition = gl.getAttribLocation(shaderProgram, "aPosition");
-const aColor = gl.getAttribLocation(shaderProgram, "aColor");
+const drawBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, drawBuffer);
 
-gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-
+const aPosition = gl.getAttribLocation(drawProgram, "aPosition");
 gl.enableVertexAttribArray(aPosition);
 gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 24, 0);
 
+const aColor = gl.getAttribLocation(drawProgram, "aColor");
 gl.enableVertexAttribArray(aColor);
 gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 24, 12);
 
+
+const pickFrameBuffer = gl.createFrameBuffer();
+const pickTexture = gl.createTexture();
+gl.bindTexture(gl.TEXTURE_2D, pickTexture);
+gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, canvas.width, canvas.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+
+const pickDepthBuffer = gl.createRenderBuffer();
+gl.bindRenderBuffer(gl.RENDERBUFFER, pickDepthBuffer);
+gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, canvas.width, canvas.height);
+
+gl.bindFrameBuffer(gl.FRAMEBUFFER, pickFrameBuffer);
+gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, pickTexture, 0);
+gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, pickDepthBuffer);
+
+gl.bindFrameBuffer(gl.FRAMEBUFFER, null);
+
+const idBuffer = gl.createBuffer();
+
 // init camera //
 
-const uProjectionMatrix = gl.getUniformLocation(shaderProgram, "uProjectionMatrix");
-const uViewMatrix = gl.getUniformLocation(shaderProgram, "uViewMatrix");
+const uProjectionMatrix = gl.getUniformLocation(drawProgram, "uProjectionMatrix");
+const uViewMatrix = gl.getUniformLocation(drawProgram, "uViewMatrix");
 const projectionMatrix = mat4.create();
 const viewMatrix = mat4.create();
 
@@ -112,6 +176,56 @@ class Direction {
         const rz = this.x * up.y - this.y * up.x;
         const length = Math.hypot(rx, ry, rz);
         return new Direction(rx / length, ry / length, rz / length);
+    }
+}
+
+class Color {
+    constructor(r, g, b) {
+        this.r = r;
+        this.g = g;
+        this.b = b;
+    }
+
+    static fromId(id) {
+        return new Color(
+            id % 256,
+            Math.floor(id / 256) % 256,
+            Math.floor(id / 65536) % 256
+        );
+    }
+
+    static fromPixel(pixel) {
+        return new Color(pixel[0], pixel[1], pixel[2]);
+    }
+
+    toId() {
+        return this.r + this.g * 256 + this.b * 65536;
+    }
+}
+
+class PointCloudAccessor {
+    constructor(buffer, stride = 6) {
+        this.buffer = buffer;
+        this.stride = stride;
+    }
+
+    getPoint(id) {
+        const i = id * this.stride;
+        return {
+            position: [this.buffer[i], this.buffer[i + 1], this.buffer[i + 2]],
+            color: new Color(
+                this.buffer[i + 3] * 255,
+                this.buffer[i + 4] * 255,
+                this.buffer[i + 5] * 255
+            )
+        };
+    }
+
+    setColor(id, color) {
+        const i = id * this.stride * 3;
+        this.buffer[i + 0] = color.r / 255;
+        this.buffer[i + 1] = color.g / 255;
+        this.buffer[i + 2] = color.b / 255;
     }
 }
 
