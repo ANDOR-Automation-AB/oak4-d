@@ -1,4 +1,7 @@
 
+let cloud = new Float32Array();
+let mouseX = 0, mouseY = 0;
+
 // init shaders //
 
 const vertexSource = `
@@ -31,6 +34,7 @@ const canvas = document.getElementById("glcanvas");
 const gl = canvas.getContext("webgl");
 const mat4 = glMatrix.mat4;
 const vec3 = glMatrix.vec3;
+const vec4 = glMatrix.vec4;
 
 if (!gl) alert("WebGL is not supported");
 canvas.width = canvas.clientWidth;
@@ -57,6 +61,34 @@ gl.attachShader(shaderProgram, fragmentShader);
 gl.linkProgram(shaderProgram);
 gl.useProgram(shaderProgram);
 
+// init floor //
+
+const floorSize = 2000;
+const floorDivisions = 20;
+const floorZ = 1100;
+const floorVertices = [];
+for (let i = 0; i < floorDivisions; i++) {
+    for (let j = 0; j < floorDivisions; j++) {
+        const x0 = -floorSize/2 + i * floorSize / floorDivisions;
+        const x1 = -floorSize/2 + (i+1) * floorSize / floorDivisions;
+        const y0 = -floorSize/2 + j * floorSize / floorDivisions;
+        const y1 = -floorSize/2 + (j+1) * floorSize / floorDivisions;
+        const r = 0.0;
+        const g = 1.0;
+        const b = 0.0;
+
+        // två trianglar per ruta
+        floorVertices.push(x0, y0, floorZ,  r, g, b);
+        floorVertices.push(x1, y0, floorZ,  r, g, b);
+        floorVertices.push(x1, y1, floorZ,  r, g, b);
+
+        floorVertices.push(x0, y0, floorZ,  r, g, b);
+        floorVertices.push(x1, y1, floorZ,  r, g, b);
+        floorVertices.push(x0, y1, floorZ,  r, g, b);
+    }
+}
+const floorArray = new Float32Array(floorVertices);
+
 // create buffer //
 
 const buffer = gl.createBuffer();
@@ -70,6 +102,11 @@ gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 24, 0);
 
 gl.enableVertexAttribArray(aColor);
 gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 24, 12);
+
+// buffer för att rita golv
+const floorBuffer = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, floorBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, floorArray, gl.STATIC_DRAW);
 
 // init camera //
 
@@ -198,6 +235,7 @@ camera.update();
 // init socket //
 
 const socket = new WebSocket("ws://localhost:5000");
+let structuredPoints = [];
 let points = 0;
 let id = [];
 socket.binaryType = "arraybuffer";
@@ -209,16 +247,62 @@ socket.onmessage = (e) => {
     points = cloud.length / 6;
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.bufferData(gl.ARRAY_BUFFER, cloud, gl.DYNAMIC_DRAW);
+
+    // ge punktinformation med koordinater och id
+    structuredPoints = [];
+    for (let i = 0; i < points; i++) {
+        const x = cloud[i * 6 + 0];
+        const y = cloud[i * 6 + 1];
+        const z = cloud[i * 6 + 2];
+        const r = cloud[i * 6 + 3];
+        const g = cloud[i * 6 + 4];
+        const b = cloud[i * 6 + 5];
+        const pointId = id[i];
+        structuredPoints.push({
+            id: pointId,
+            x, y, z,
+            r, g, b
+        });
+    }
 };
 
-// render //
+// render loop //
 
 function render() {
     gl.clearColor(0, 0, 0, 1);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    
     gl.uniformMatrix4fv(uProjectionMatrix, false, projectionMatrix);
     gl.uniformMatrix4fv(uViewMatrix, false, viewMatrix);
+
+    // rita grön matta
+    gl.bindBuffer(gl.ARRAY_BUFFER, floorBuffer);
+    gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 24, 0);
+    gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 24, 12);
+    gl.drawArrays(gl.TRIANGLES, 0, floorArray.length / 6);
+
+    // rita punkter
+    gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+    gl.vertexAttribPointer(aPosition, 3, gl.FLOAT, false, 24, 0);
+    gl.vertexAttribPointer(aColor, 3, gl.FLOAT, false, 24, 12);
     gl.drawArrays(gl.POINTS, 0, points);
+
+    // uppdatera världskoordinatera för punktinfo
+    const mvp = mat4.create();
+    mat4.multiply(mvp, projectionMatrix, viewMatrix);
+    for (let i = 0; i < structuredPoints.length; i++) {
+        const point = structuredPoints[i];
+        const worldPosition = vec4.fromValues(point.x, point.y, point.z, 1.0);
+        const clipSpace = vec4.create();
+        vec4.transformMat4(clipSpace, worldPosition, mvp);
+
+        const ndcX = clipSpace[0] / clipSpace[3];
+        const ndcY = clipSpace[1] / clipSpace[3];
+
+        point.screenX = (ndcX * 0.5 + 0.5) * canvas.width;
+        point.screenY = (1.0 - (ndcY * 0.5 + 0.5)) * canvas.height;
+    }
+
     requestAnimationFrame(render);
 }
 requestAnimationFrame(render);
@@ -229,6 +313,8 @@ let isDragging = false;
 let lastX, lastY;
 
 canvas.addEventListener("mousedown", e => {
+
+    // aktivera rotera vid rörelse
     if (e.button === 0) {
         isDragging = true;
         lastX = e.clientX;
@@ -239,6 +325,39 @@ canvas.addEventListener("mouseup", e => {
     if (e.button === 0) isDragging = false;
 });
 canvas.addEventListener("mousemove", e => {
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+
+    // uppdatera pekarkoordinater
+    let closest = null;
+    let minDist = Infinity;
+    const maxDist = 20;
+    for (let i = 0; i < structuredPoints.length; i++) {
+        const p = structuredPoints[i];
+        const dx = p.screenX - mouseX;
+        const dy = p.screenY - mouseY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < minDist && dist < maxDist) {
+            minDist = dist;
+            closest = p;
+        }
+    }
+    const infoBox = document.getElementById("hover-info");
+    if (closest) {
+        infoBox.style.display = "block";
+        infoBox.style.left = (mouseX + 15) + "px";
+        infoBox.style.top = (mouseY + 15) + "px";
+        infoBox.innerHTML = `
+            <b>ID:</b> ${closest.id}<br>
+            <b>X:</b> ${closest.x.toFixed(2)}<br>
+            <b>Y:</b> ${closest.y.toFixed(2)}<br>
+            <b>Z:</b> ${closest.z.toFixed(2)}
+        `;
+    } else {
+        infoBox.style.display = "none";
+    }
+
+    // rotera vid rörelse om aktiv
     if (!isDragging) return;
     const deltaX = e.clientX - lastX;
     const deltaY = e.clientY - lastY;

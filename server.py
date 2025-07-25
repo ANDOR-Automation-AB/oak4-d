@@ -20,9 +20,14 @@ async def sendSnapshot(socket):
         while True:
             pointsCloud = outputQueue.get()
             positions, colors = pointsCloud.getPointsRGB()
-            colors = colors[:, :3].astype(np.float32) / 255.0
+
+            z_mask = positions[:, 2] <= 1100
+            positions = positions[z_mask]
+            colors = colors[z_mask, :3].astype(np.float32) / 255.0
+
             id = np.arange(len(positions), dtype=np.float32).reshape(-1, 1)
             stack = np.hstack((positions, colors, id))
+
             await socket.send(stack.tobytes())
 
 async def main():
